@@ -34,6 +34,8 @@ class VectorQuant(_VQBaseLayer):
 			feature_size : int,
 			num_codes : int,
 			beta : float = 0.95,
+			commit_coef: float = 0.5, 
+			vq_coef: float = 1.0, 
 			sync_nu : float = 0.0,
 			affine_lr:	float = 0.0,
 			affine_groups: int = 1,
@@ -49,9 +51,15 @@ class VectorQuant(_VQBaseLayer):
 			raise ValueError(f'beta must be in [0, 1] but got {beta}')
 			
 		self.beta = beta
+		self.vq_coef = vq_coef
+		self.commit_coef = commit_coef
 		self.nu = sync_nu
 		self.affine_lr = affine_lr
 		self.codebook = nn.Embedding(self.num_codes, self.feature_size)
+		# alternative init? TODO
+		#self.codebook.weight.detach().normal_(0, 0.02)
+		#torch.fmod(self.codebook.weight, 0.04)
+				
 
 		if inplace_optimizer is not None:
 			if beta != 1.0:
@@ -76,14 +84,20 @@ class VectorQuant(_VQBaseLayer):
 		if self.nu > 0:
 			z_q = z + (z_q - z).detach() + (self.nu * z_q) + (-self.nu * z_q).detach()
 		else:
+			# pass z_q forward but during backprop it falls away and we only prop back loss form encoder
 			z_q = z + (z_q - z).detach()
 		return z_q
 
 
 	def compute_loss(self, z_e, z_q):
 		""" computes loss between z and z_q """
-		return ((1.0 - self.beta) * self.loss_fn(z_e, z_q.detach()) + \
-					  (self.beta) * self.loss_fn(z_e.detach(), z_q))
+		# commitment loss
+		commitment = self.commit_coef * self.loss_fn(z_e, z_q.detach())
+
+		codebook = self.vq_coef * self.loss_fn(z_e.detach(), z_q) 
+	
+		return commitment + codebook, codebook, commitment
+
 
 
 	def quantize(self, codebook, z):
@@ -103,6 +117,7 @@ class VectorQuant(_VQBaseLayer):
 			self.affine_transform.update_running_statistics(z_flat, codebook)
 			codebook = self.affine_transform(codebook)
 
+		# no gradient for computation involving z (like z_e.detach())
 		with torch.no_grad():
 			dist_out = self.dist_fn(
 							tensor=z_flat,
@@ -114,8 +129,10 @@ class VectorQuant(_VQBaseLayer):
 
 			d = dist_out['d'].view(z_shape)
 			q = dist_out['q'].view(z_shape).long()
-
+		# gradiemnt here again for embeddings in codebook
+		# but i dont think lookup adds to gradient => straight-through
 		z_q = F.embedding(q, codebook)
+	
 
 		if self.training and hasattr(self, 'inplace_codebook_optimizer'):
 			# update codebook inplace 
@@ -127,8 +144,15 @@ class VectorQuant(_VQBaseLayer):
 			z_q = F.embedding(q, codebook)
 
 			# NOTE to save compute, we assumed Q did not change.
+		# compute codebook metrics
+		q_flat = q.view(-1)
+		unique_codes = torch.unique(q_flat)
+		utilization = unique_codes.numel()
 
-		return z_q, d, q
+		utilization_fraction = utilization / codebook.shape[0]
+		
+
+		return z_q, d, q, torch.Tensor([utilization_fraction])
 
 	@torch.no_grad()
 	def get_codebook(self):
@@ -158,22 +182,27 @@ class VectorQuant(_VQBaseLayer):
 		######
 		## (2) quantize latent vector
 		######
-
-		z_q, d, q = self.quantize(self.codebook.weight, z)
+		# z_q for loss, z_e essentially detached (without_grad)
+		#print("Codebook grad std:", self.codebook.weight)
+		z_q, d, q, utilization = self.quantize(self.codebook.weight, z)
 
 		# e_mean = F.one_hot(q, num_classes=self.num_codes).view(-1, self.num_codes).float().mean(0)
 		# perplexity = torch.exp(-torch.sum(e_mean * torch.log(e_mean + 1e-10)))
 		perplexity = None
-
+		total_loss, commitment_loss, codebook_loss = self.compute_loss(z, z_q)
+		# TODO shape of loss, what do we take mean over? should be batch dim
 		to_return = {
 			'z'  : z,               # each group input z_e
 			'z_q': z_q,             # quantized output z_q
 			'd'  : d,               # distance function for each group
 			'q'	 : q,				# codes
-			'loss': self.compute_loss(z, z_q).mean(),
+			'loss': total_loss.mean(),
 			'perplexity': perplexity,
+			'commitment_loss': commitment_loss.mean(), 
+			'codebook_loss': codebook_loss.mean(), 
+			'codebook_utilization': utilization 
 			}
-
+		# to get loss for encoder
 		z_q = self.straight_through_approximation(z, z_q)
 		z_q = self.to_original_format(z_q)
 
