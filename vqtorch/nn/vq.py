@@ -57,8 +57,8 @@ class VectorQuant(_VQBaseLayer):
 		self.affine_lr = affine_lr
 		self.codebook = nn.Embedding(self.num_codes, self.feature_size)
 		# alternative init? TODO
-		#self.codebook.weight.detach().normal_(0, 0.02)
-		#torch.fmod(self.codebook.weight, 0.04)
+		self.codebook.weight.detach().normal_(0, 0.02)
+		torch.fmod(self.codebook.weight, 0.04)
 				
 
 		if inplace_optimizer is not None:
