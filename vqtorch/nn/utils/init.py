@@ -17,7 +17,7 @@ def data_dependent_init_forward_hook(self, inputs, outputs, use_kmeans=True, ver
 
 	def sample_centroids(z_e, num_codes):
 		""" replaces the data of the codebook with z_e randomly. """
-
+		# z_e.size(1)?
 		z_e = z_e.reshape(-1, z_e.size(-1))
 
 		if num_codes >= z_e.size(0):
@@ -33,6 +33,8 @@ def data_dependent_init_forward_hook(self, inputs, outputs, use_kmeans=True, ver
 
 		else:
 			# you have more warmup samples than codebook. subsample data
+			dev = z_e.device
+			z_e = z_e.to("cpu")
 			if use_kmeans:
 				from torchpq.clustering import KMeans
 				kmeans = KMeans(n_clusters=num_codes, distance='euclidean', init_mode="kmeans++")
@@ -42,7 +44,7 @@ def data_dependent_init_forward_hook(self, inputs, outputs, use_kmeans=True, ver
 				indices = torch.randint(low=0, high=num_codes, size=(num_codes,))
 				indices = indices.to(z_e.device)
 				new_codes = torch.index_select(z_e, 0, indices).to(z_e.device).data
-
+		new_codes = new_codes.to(dev)
 		return new_codes
 
 	_, misc = outputs
