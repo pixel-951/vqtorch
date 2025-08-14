@@ -110,8 +110,8 @@ class VectorQuant(_VQBaseLayer):
 		"""
 
 		# reshape to (BHWG x F//G) and compute distance
-		z_shape = z.shape[:-1]
-		z_flat = z.view(z.size(0), -1, z.size(-1))
+		z_shape = z.shape[:-1] # b x h x w
+		z_flat = z.view(z.size(0), -1, z.size(-1)) # b  x h*w x f
 
 		if hasattr(self, 'affine_transform'):
 			self.affine_transform.update_running_statistics(z_flat, codebook)
@@ -144,15 +144,68 @@ class VectorQuant(_VQBaseLayer):
 			z_q = F.embedding(q, codebook)
 
 			# NOTE to save compute, we assumed Q did not change.
+   
+
+		diagnostics = self.get_cb_diagnostics(z, q, codebook)
+
+  
+
+		return z_q, d, q, diagnostics 
+
+
+	def get_cb_diagnostics(self, z, q): 
+     
 		# compute codebook metrics
+  
+  
+
+		# utilization across whole batch 
 		q_flat = q.view(-1)
-		unique_codes = torch.unique(q_flat)
-		utilization = unique_codes.numel()
-
-		utilization_fraction = utilization / codebook.shape[0]
+		unique_batch = torch.unique(q_flat)
+		utilization = unique_batch.numel()
+		utilization_batch = utilization / self.num_codes
+  
+		# code utilization (avg over batch )
+		q_feat = q.view(z.shape[0], -1)
+		utilization_samples = torch.Tensor([torch.unique(assignments).numel()/self.num_codes 
+                                     for assignments in q_feat])
+		utilization_mean = utilization_samples.mean(dim=0) 
+		utilzation_var = utilization_samples.var(dim=0) 
+  
 		
-
-		return z_q, d, q, torch.Tensor([utilization_fraction])
+		# codebooks used per sample (avg over batch)
+		utilization_count = utilization_mean * self.num_codes
+	
+ 
+		# histogram 
+		device = q_flat.device
+		q_flat = q_flat.to("cpu", dtype=torch.float32)
+		# mean over batch and .view (b, -1), then hist. with bins=self.num codes and range (0, self.num_codes)
+		hist = torch.histogram(q_flat, bins=self.num_codes, range=(0, self.num_codes), density=True)[0]
+  
+		hist = hist.to(device)
+  
+  
+		# effective codebook size
+		p = hist/hist.sum()
+		p_nonzero = p[p > 0]  # avoid log(0)
+		eff_cb_size = torch.exp(-(p_nonzero * p_nonzero.log()).sum())	
+  
+		# codebook assignment vector
+		assignment_vec = q_feat.float().mean(0)
+  
+  
+		diagnostics = {
+			'utilization_batch': utilization_batch,
+			'utilization_mean': utilization_mean,
+			'utilization_var': utilzation_var,
+			'utilization_count': utilization_count,
+			'codes_hist': hist,
+			'eff_cb_size': eff_cb_size,
+			'assignment_vec': assignment_vec,
+		}
+  
+		return diagnostics
 
 	@torch.no_grad()
 	def get_codebook(self):
@@ -184,24 +237,24 @@ class VectorQuant(_VQBaseLayer):
 		######
 		# z_q for loss, z_e essentially detached (without_grad)
 		#print("Codebook grad std:", self.codebook.weight)
-		z_q, d, q, utilization = self.quantize(self.codebook.weight, z)
+		z_q, d, q, diagnostics = self.quantize(self.codebook.weight, z)
 
 		# e_mean = F.one_hot(q, num_classes=self.num_codes).view(-1, self.num_codes).float().mean(0)
 		# perplexity = torch.exp(-torch.sum(e_mean * torch.log(e_mean + 1e-10)))
-		perplexity = None
+		#perplexity = None
 		total_loss, commitment_loss, codebook_loss = self.compute_loss(z, z_q)
 		# TODO shape of loss, what do we take mean over? should be batch dim
 		to_return = {
-			'z'  : z,               # each group input z_e
+			'z'  : z,               # each group input z_e TODO: detach here?
 			'z_q': z_q,             # quantized output z_q
 			'd'  : d,               # distance function for each group
 			'q'	 : q,				# codes
 			'loss': total_loss.mean(),
-			'perplexity': perplexity,
+			#'perplexity': perplexity,
 			'commitment_loss': commitment_loss.mean(), 
-			'codebook_loss': codebook_loss.mean(), 
-			'codebook_utilization': utilization 
+			'codebook_loss': codebook_loss.mean()
 			}
+		to_return.update(diagnostics)
 		# to get loss for encoder
 		z_q = self.straight_through_approximation(z, z_q)
 		z_q = self.to_original_format(z_q)
