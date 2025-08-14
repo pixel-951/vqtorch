@@ -146,7 +146,7 @@ class VectorQuant(_VQBaseLayer):
 			# NOTE to save compute, we assumed Q did not change.
    
 
-		diagnostics = self.get_cb_diagnostics(z, q, codebook)
+		diagnostics = self.get_cb_diagnostics(z, q)
 
   
 
@@ -183,7 +183,7 @@ class VectorQuant(_VQBaseLayer):
 		# mean over batch and .view (b, -1), then hist. with bins=self.num codes and range (0, self.num_codes)
 		hist = torch.histogram(q_flat, bins=self.num_codes, range=(0, self.num_codes), density=True)[0]
   
-		hist = hist.to(device)
+		#hist = hist.to(device)
   
   
 		# effective codebook size
@@ -196,7 +196,7 @@ class VectorQuant(_VQBaseLayer):
   
   
 		diagnostics = {
-			'utilization_batch': utilization_batch,
+			'utilization_batch': torch.tensor(utilization_batch),
 			'utilization_mean': utilization_mean,
 			'utilization_var': utilzation_var,
 			'utilization_count': utilization_count,
@@ -249,7 +249,7 @@ class VectorQuant(_VQBaseLayer):
 			'z_q': z_q,             # quantized output z_q
 			'd'  : d,               # distance function for each group
 			'q'	 : q,				# codes
-			'loss': total_loss.mean(),
+			'vq_loss': total_loss.mean(),
 			#'perplexity': perplexity,
 			'commitment_loss': commitment_loss.mean(), 
 			'codebook_loss': codebook_loss.mean()
