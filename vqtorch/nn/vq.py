@@ -41,6 +41,7 @@ class VectorQuant(_VQBaseLayer):
 			affine_groups: int = 1,
 			replace_freq: int = 0,
 			inplace_optimizer: torch.optim.Optimizer = None,
+			q_nca: bool = False,
 			**kwargs,
 			):
 
@@ -59,6 +60,7 @@ class VectorQuant(_VQBaseLayer):
 		# alternative init? TODO
 		self.codebook.weight.detach().normal_(0, 0.02)
 		torch.fmod(self.codebook.weight, 0.04)
+		self.q_nca = q_nca
 				
 
 		if inplace_optimizer is not None:
@@ -154,7 +156,7 @@ class VectorQuant(_VQBaseLayer):
 
 
 	def get_cb_diagnostics(self, z, q): 
-     
+	 
 		# compute codebook metrics
   
   
@@ -168,7 +170,7 @@ class VectorQuant(_VQBaseLayer):
 		# code utilization (avg over batch )
 		q_feat = q.view(z.shape[0], -1)
 		utilization_samples = torch.Tensor([torch.unique(assignments).numel()/self.num_codes 
-                                     for assignments in q_feat])
+									 for assignments in q_feat])
 		utilization_mean = utilization_samples.mean(dim=0) 
 		utilzation_var = utilization_samples.var(dim=0) 
   
@@ -188,7 +190,7 @@ class VectorQuant(_VQBaseLayer):
   
 		# effective codebook size
 		p = hist/hist.sum()
-		p_nonzero = p[p > 0]  # avoid log(0)
+		p_nonzero = p[p > 0]  # avoid log(0) TODO: take them into account though!
 		eff_cb_size = torch.exp(-(p_nonzero * p_nonzero.log()).sum())	
   
 		# codebook assignment vector
@@ -205,6 +207,12 @@ class VectorQuant(_VQBaseLayer):
 			'assignment_vec': assignment_vec,
 		}
   
+		if self.q_nca: # also output unique codes per sample
+			# (b, unqiue_values)
+			unique_per_image = [torch.unique(assignments).cpu()
+									 for assignments in q_feat]
+			diagnostics["unique_codes_per_image"] = unique_per_image
+
 		return diagnostics
 
 	@torch.no_grad()
