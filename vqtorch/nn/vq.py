@@ -212,6 +212,8 @@ class VectorQuant(_VQBaseLayer):
 			unique_per_image = [torch.unique(assignments).cpu()
 									 for assignments in q_feat]
 			diagnostics["unique_codes_per_image"] = unique_per_image
+			# return z_q id map
+			diagnostics["code_idx_assignments"] = q.permute(0, 3, 1, 2)/self.num_codes
 
 		return diagnostics
 
