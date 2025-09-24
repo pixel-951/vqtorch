@@ -2,11 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from typing import Tuple, List, Union
+
 from vqtorch.dists import get_dist_fns
 import vqtorch
 from vqtorch.norms import with_codebook_normalization
 from .vq_base import _VQBaseLayer
 from .affine import AffineTransform
+
+from qnca.utils import mean_unique_per_sample
 
 
 class VectorQuant(_VQBaseLayer):
@@ -81,7 +85,7 @@ class VectorQuant(_VQBaseLayer):
 		return
 
 
-	def straight_through_approximation(self, z, z_q):
+	def straight_through_approximation(self, z:torch.Tensor, z_q:torch.Tensor) -> torch.Tensor:
 		""" passed gradient from z_q to z """
 		if self.nu > 0:
 			z_q = z + (z_q - z).detach() + (self.nu * z_q) + (-self.nu * z_q).detach()
@@ -90,8 +94,8 @@ class VectorQuant(_VQBaseLayer):
 			z_q = z + (z_q - z).detach()
 		return z_q
 
-
-	def compute_loss(self, z_e, z_q):
+   
+	def compute_loss(self, z_e, z_q) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 		""" computes loss between z and z_q """
 		# commitment loss
 		commitment = self.commit_coef * self.loss_fn(z_e, z_q.detach())
@@ -102,13 +106,19 @@ class VectorQuant(_VQBaseLayer):
 
 
 
-	def quantize(self, codebook, z):
+	def quantize(self, codebook: torch.Tensor, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
 		"""
-		Quantizes the latent codes z with the codebook
+		Quantizes the latent codes z with the codebook.
 
 		Args:
-			codebook (Tensor): B x F
-			z (Tensor): B x ... x F
+			codebook (Tensor): N x C
+			z (Tensor): B x H x W x C
+   
+		Returns: 
+			z_q (Tensor): B x (HW) x C
+			d (Tensor): B x (HW) x 1 Distance mapping feature -> nearest code
+			q (Tensor): B x (HW) x 1 Index mapping feature -> nearest code
+			diagnostics (dict): CB diagnostics dict
 		"""
 
 		# reshape to (BHWG x F//G) and compute distance
@@ -131,8 +141,7 @@ class VectorQuant(_VQBaseLayer):
 
 			d = dist_out['d'].view(z_shape)
 			q = dist_out['q'].view(z_shape).long()
-		# gradiemnt here again for embeddings in codebook
-		# but i dont think lookup adds to gradient => straight-through
+		# embedding idx lookup
 		z_q = F.embedding(q, codebook)
 	
 
@@ -155,11 +164,16 @@ class VectorQuant(_VQBaseLayer):
 		return z_q, d, q, diagnostics 
 
 
-	def get_cb_diagnostics(self, z, q): 
+	def get_cb_diagnostics(self, z: torch.Tensor, q: torch.Tensor) -> dict: 
 	 
-		# compute codebook metrics
-  
-  
+		"""
+		Receives continous latent maps z, latent: code mapping q 
+  		and returns vq_dict with codebook analytics. 
+
+		Args:
+			z (Tensor): B x H x W x C
+			q (Tensor): B x (HW)
+		"""
 
 		# utilization across whole batch 
 		q_flat = q.view(-1)
@@ -206,31 +220,29 @@ class VectorQuant(_VQBaseLayer):
 			'eff_cb_size': eff_cb_size,
 			'assignment_vec': assignment_vec,
 		}
-  
+
+        
 		if self.q_nca: # also output unique codes per sample
 			# (b, unqiue_values)
-			unique_per_image = [torch.unique(assignments).cpu()
-									 for assignments in q_feat]
-			diagnostics["unique_codes_per_image"] = unique_per_image
+		
+			diagnostics["mean_unique_per_sample"] = mean_unique_per_sample(z_q=q_feat, cb_size=self.num_codes)
 			# return z_q id map
-			diagnostics["code_idx_assignments"] = q.permute(0, 3, 1, 2)/self.num_codes
+			diagnostics["code_idx_assignments"] = q.permute(0, 3, 1, 2)
 
 		return diagnostics
 
-	@torch.no_grad()
-	def get_codebook(self):
-		cb = self.codebook.weight
-		if hasattr(self, 'affine_transform'):
-			cb = self.affine_transform(cb)
-		return cb
-
-	def get_codebook_affine_params(self):
-		if hasattr(self, 'affine_transform'):
-			return self.affine_transform.get_affine_params()
-		return None
-
 	@with_codebook_normalization
-	def forward(self, z):
+	def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, dict]:
+		"""Quantizes latent map z and returns quantized features z_q and diagnostics dict.
+
+		Args:
+			z (Tensor): B x H x W x C
+   
+		Returns: 
+			z_q (Tensor): B x F
+			diagnostics (dict): see forward and get_cb_diagnostics for items
+  
+  		"""
 
 		######
 		## (1) formatting data by groups and invariant to dim
@@ -245,8 +257,7 @@ class VectorQuant(_VQBaseLayer):
 		######
 		## (2) quantize latent vector
 		######
-		# z_q for loss, z_e essentially detached (without_grad)
-		#print("Codebook grad std:", self.codebook.weight)
+		
 		z_q, d, q, diagnostics = self.quantize(self.codebook.weight, z)
 
 		# e_mean = F.one_hot(q, num_classes=self.num_codes).view(-1, self.num_codes).float().mean(0)
@@ -270,3 +281,16 @@ class VectorQuant(_VQBaseLayer):
 		z_q = self.to_original_format(z_q)
 
 		return z_q, to_return
+
+
+	@torch.no_grad()
+	def get_codebook(self):
+		cb = self.codebook.weight
+		if hasattr(self, 'affine_transform'):
+			cb = self.affine_transform(cb)
+		return cb
+
+	def get_codebook_affine_params(self):
+		if hasattr(self, 'affine_transform'):
+			return self.affine_transform.get_affine_params()
+		return None
