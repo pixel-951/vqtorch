@@ -154,6 +154,3 @@ class _VQBaseLayer(nn.Module):
 			f"enabled: {self.enabled}",
 		])
 		return repr
-
-	def init_codebook(self, init_vecs: torch.Tensor) -> None: 
-		self.codebook.weight.data = init_vecs
