@@ -10,7 +10,6 @@ from vqtorch.norms import with_codebook_normalization
 from .vq_base import _VQBaseLayer
 from .affine import AffineTransform
 
-from qnca.utils import mean_unique_per_sample
 
 
 class VectorQuant(_VQBaseLayer):
@@ -224,8 +223,6 @@ class VectorQuant(_VQBaseLayer):
         
 		if self.q_nca: # also output unique codes per sample
 			# (b, unqiue_values)
-		
-			diagnostics["mean_unique_per_sample"] = mean_unique_per_sample(z_q=q_feat, cb_size=self.num_codes)
 			# return z_q id map
 			diagnostics["code_idx_assignments"] = q.permute(0, 3, 1, 2)
 
