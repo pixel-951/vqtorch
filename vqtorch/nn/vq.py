@@ -12,6 +12,7 @@ from .affine import AffineTransform
 
 
 
+
 class VectorQuant(_VQBaseLayer):
 	"""
 	Vector quantization layer using straight-through estimation.
@@ -43,8 +44,11 @@ class VectorQuant(_VQBaseLayer):
 			affine_lr:	float = 0.0,
 			affine_groups: int = 1,
 			replace_freq: int = 0,
+			ema_updates: bool = False,
+			ema_decay=0.99, 
 			inplace_optimizer: torch.optim.Optimizer = None,
 			q_nca: bool = False,
+			device:str='cuda',
 			**kwargs,
 			):
 
@@ -53,7 +57,9 @@ class VectorQuant(_VQBaseLayer):
 
 		if beta < 0.0 or beta > 1.0:
 			raise ValueError(f'beta must be in [0, 1] but got {beta}')
-			
+		
+		self.device = device
+
 		self.beta = beta
 		self.vq_coef = vq_coef
 		self.commit_coef = commit_coef
@@ -64,7 +70,6 @@ class VectorQuant(_VQBaseLayer):
 		#self.codebook.weight.detach().normal_(0, 0.02)
 		#torch.fmod(self.codebook.weight, 0.04)
 		#self.codebook.weight.data.normal_(0, 1)
-		self.q_nca = q_nca
 				
 
 		if inplace_optimizer is not None:
@@ -80,9 +85,19 @@ class VectorQuant(_VQBaseLayer):
 										lr_scale=affine_lr,
 										num_groups=affine_groups,
 										)
-		if replace_freq > 0:
-			vqtorch.nn.utils.lru_replacement(self, rho=0.01, timeout=replace_freq)
+		#if replace_freq > 0:
+		#	vqtorch.nn.utils.lru_replacement(self, rho=0.01, timeout=replace_freq)
+		self.ema_updates = ema_updates
+
+		if self.ema_updates:
+			self.ema_decay = ema_decay
+			self.ema_cluster_size = torch.zeros(num_codes, device=self.device)
+			self.ema_codebook = self.codebook.weight.data.clone().to(self.device)
+
 		return
+	
+
+
 
 
 	def straight_through_approximation(self, z:torch.Tensor, z_q:torch.Tensor) -> torch.Tensor:
@@ -100,10 +115,13 @@ class VectorQuant(_VQBaseLayer):
 		# commitment loss
 		commitment = self.commit_coef * self.loss_fn(z_e, z_q.detach())
 
-		codebook = self.vq_coef * self.loss_fn(z_e.detach(), z_q) 
-	
-		return commitment + codebook, codebook, commitment
-
+		# if we use EMA updates, this falls away 
+		if not self.ema_updates: 
+			codebook = self.vq_coef * self.loss_fn(z_e.detach(), z_q) 
+			return commitment + codebook, codebook, commitment
+		else: 
+			return commitment
+			
 
 
 	def quantize(self, codebook: torch.Tensor, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
@@ -139,8 +157,9 @@ class VectorQuant(_VQBaseLayer):
 							half_precision=(z.is_cuda),
 							)
 
-			d = dist_out['d'].view(z_shape)
+			d = dist_out['d'].view(z_shape) # => b x h x w x 1 basically
 			q = dist_out['q'].view(z_shape).long()
+
 		# embedding idx lookup
 		z_q = F.embedding(q, codebook)
 	
@@ -158,7 +177,6 @@ class VectorQuant(_VQBaseLayer):
    
 
 		diagnostics = self.get_cb_diagnostics(z, q)
-
   
 
 		return z_q, d, q, diagnostics 
@@ -222,10 +240,8 @@ class VectorQuant(_VQBaseLayer):
 		}
 
         
-		if self.q_nca: # also output unique codes per sample
-			# (b, unqiue_values)
-			# return z_q id map
-			diagnostics["code_idx_assignments"] = q.permute(0, 3, 1, 2)
+	
+		diagnostics["code_idx_assignments"] = q.permute(0, 3, 1, 2)
 
 		return diagnostics
 
@@ -261,24 +277,48 @@ class VectorQuant(_VQBaseLayer):
 		# e_mean = F.one_hot(q, num_classes=self.num_codes).view(-1, self.num_codes).float().mean(0)
 		# perplexity = torch.exp(-torch.sum(e_mean * torch.log(e_mean + 1e-10)))
 		#perplexity = None
-		total_loss, commitment_loss, codebook_loss = self.compute_loss(z, z_q)
 		# TODO shape of loss, what do we take mean over? should be batch dim
 		to_return = {
-			'z'  : z,               # each group input z_e TODO: detach here?
-			'z_q': z_q,             # quantized output z_q
+			'z'  : z,               # pre-quant features
+			'z_q': z_q,             # quantized features, corresponding to one code
 			'd'  : d,               # distance function for each group
 			'q'	 : q,				# codes
-			'vq_loss': total_loss.mean(),
-			#'perplexity': perplexity,
-			'commitment_loss': commitment_loss.mean(), 
-			'codebook_loss': codebook_loss.mean()
 			}
+		
+		if not self.ema_updates: 
+			total_loss, commitment_loss, codebook_loss = self.compute_loss(z, z_q)
+			to_return.update({'vq_loss': total_loss.mean(),
+			'commitment_loss': commitment_loss.mean(), 
+			'codebook_loss': codebook_loss.mean()})
+		else: 
+			total_loss = self.compute_loss(z, z_q)	
+			to_return.update({'vq_loss': total_loss.mean()})
+
 		to_return.update(diagnostics)
 		# to get loss for encoder
 		z_q = self.straight_through_approximation(z, z_q)
 		z_q = self.to_original_format(z_q)
 
 		return z_q, to_return
+
+	@torch.no_grad()
+	def cb_ema_update(self, z:torch.Tensor, q:torch.Tensor) -> None: 
+		z_flat = z.view(-1, z.size(-1))      # (N, C)
+		q_flat = q.view(-1)                  # (N,)
+
+		enc = F.one_hot(q_flat, self.num_codes).float()  # (N, K)
+
+		cluster_size = enc.sum(0)                   # (K,) => c_k^t
+		embed_sum = enc.t() @ z_flat                # (K, C) => s_k^t
+
+		self.ema_cluster_size.mul_(self.ema_decay).add_(cluster_size, alpha=1 - self.ema_decay)
+		self.ema_codebook.mul_(self.ema_decay).add_(embed_sum,   alpha=1 - self.ema_decay)
+
+		# update codebook
+		denom = self.ema_cluster_size.unsqueeze(1) + 1e-5
+		self.codebook.weight.data.copy_(self.ema_codebook / denom)
+		
+
 
 
 	@torch.no_grad()

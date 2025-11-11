@@ -157,4 +157,4 @@ class _VQBaseLayer(nn.Module):
 
 	@torch.no_grad()
 	def init_codebook(self, init_vecs: torch.Tensor) -> None: 
-		self.codebook.weight.data = init_vecs
+		self.codebook.weight.data.copy_(init_vecs)

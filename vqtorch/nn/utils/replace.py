@@ -16,8 +16,8 @@ class ReplaceLRU():
 		self.rho = rho
 		self.timeout = timeout
 
-		self.policy = 'input_random'
-		# self.policy = 'input_kmeans'
+		#self.policy = 'input_random'
+		self.policy = 'input_kmeans'
 		# self.policy = 'self'
 		self.tau = 2.0
 
@@ -33,7 +33,7 @@ class ReplaceLRU():
 		module.register_buffer('_counts', timeout * torch.ones(module.num_codes))
 		module._counts = module._counts.to(device)
 		return fn
-
+	
 	def __call__(self, module, inputs, outputs):
 		"""
 		This function is triggered during forward pass
@@ -46,9 +46,14 @@ class ReplaceLRU():
 			outputs (tuple): A tuple with 2 elements
 				z_q (Tensor), misc (dict)
 		"""
+
 		if not module.training:
 			return
+		# 
+		if not torch.is_grad_enabled(): 
+			return outputs
 
+		
 		# count down all code by 1 and if used, reset timer to timeout value
 		module._counts -= 1
 
