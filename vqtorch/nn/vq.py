@@ -47,6 +47,7 @@ class VectorQuant(_VQBaseLayer):
 			ema_updates: bool = False,
 			ema_decay=0.99, 
 			inplace_optimizer: torch.optim.Optimizer = None,
+			normal_init: bool=True, 
 			q_nca: bool = False,
 			device:str='cuda',
 			**kwargs,
@@ -67,9 +68,10 @@ class VectorQuant(_VQBaseLayer):
 		self.affine_lr = affine_lr
 		self.codebook = nn.Embedding(self.num_codes, self.feature_size)
 		# alternative init? TODO
+		if normal_init: 
 		#self.codebook.weight.detach().normal_(0, 0.02)
 		#torch.fmod(self.codebook.weight, 0.04)
-		#self.codebook.weight.data.normal_(0, 1)
+			self.codebook.weight.data.normal_(0, 1)
 				
 
 		if inplace_optimizer is not None:
