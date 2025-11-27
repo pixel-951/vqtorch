@@ -288,7 +288,7 @@ class VectorQuant(_VQBaseLayer):
 			}
 		
 		if not self.ema_updates: 
-			total_loss, commitment_loss, codebook_loss = self.compute_loss(z, z_q)
+			total_loss, codebook_loss, commitment_loss = self.compute_loss(z, z_q)
 			to_return.update({'vq_loss': total_loss.mean(),
 			'commitment_loss': commitment_loss.mean(), 
 			'codebook_loss': codebook_loss.mean()})
